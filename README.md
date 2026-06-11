@@ -1,4 +1,4 @@
-# SuperBizAgent
+# Intelligent Consulting Agent
 
 > 企业级智能对话和运维助手，支持 RAG 知识库问答和 AIOps 智能诊断
 
@@ -414,3 +414,4 @@ netstat -ano | findstr :8004  # Monitor MCP
 author： chief
 
 MIT License
+=======
