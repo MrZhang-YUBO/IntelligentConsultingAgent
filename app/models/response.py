@@ -20,6 +20,9 @@ class SessionInfoResponse(BaseModel):
     session_id: str = Field(..., description="会话 ID")
     message_count: int = Field(..., description="消息数量")
     history: List[Dict[str, str]] = Field(..., description="历史消息列表")
+    intents: List[Dict[str, Any]] = Field(
+        default_factory=list, description="意图识别轨迹列表（按时间顺序）"
+    )
 
 
 class ApiResponse(BaseModel):

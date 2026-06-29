@@ -55,6 +55,9 @@ class DashScopeEmbeddings(Embeddings):
             return f"{api_key[:8]}...{api_key[-4:]}"
         return "***"
 
+    # DashScope API 每批最多 10 个文本
+    MAX_BATCH_SIZE = 10
+
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         """
         批量嵌入文档列表 (LangChain 标准接口)
@@ -69,20 +72,33 @@ class DashScopeEmbeddings(Embeddings):
             return []
         
         try:
-            logger.info(f"批量嵌入 {len(texts)} 个文档")
+            logger.info(f"批量嵌入 {len(texts)} 个文档 (每批最多 {self.MAX_BATCH_SIZE} 个)")
             
-            # 批量调用 API
-            response = self.client.embeddings.create(
-                model=self.model,
-                input=texts,
-                dimensions=self.dimensions,
-                encoding_format="float"
-            )
+            # 用于收集所有批次的向量结果
+            all_embeddings: List[List[float]] = []
             
-            embeddings = [item.embedding for item in response.data]
-            logger.debug(f"批量嵌入完成, 维度: {len(embeddings[0])}")
+            # 分批处理：从 0 开始，每次步进 MAX_BATCH_SIZE
+            for i in range(0, len(texts), self.MAX_BATCH_SIZE):
+                # 切片取当前批次（Python 切片自动处理边界，超过长度自动截断）
+                batch = texts[i:i + self.MAX_BATCH_SIZE]
+                logger.debug(f"处理第 {i // self.MAX_BATCH_SIZE + 1} 批, {len(batch)} 个文档")
+                
+                # 调用 API 嵌入当前批次
+                response = self.client.embeddings.create(
+                    model=self.model,
+                    input=batch,
+                    dimensions=self.dimensions,
+                    encoding_format="float"
+                )
+                
+                # 取出当前批次的向量列表并追加到总结果
+                batch_embeddings = [item.embedding for item in response.data]
+                all_embeddings.extend(batch_embeddings)
+                
+                logger.debug(f"当前批嵌入完成, 维度: {len(batch_embeddings[0])}")
             
-            return embeddings
+            logger.debug(f"全部批次完成, 共 {len(all_embeddings)} 个向量")
+            return all_embeddings
             
         except Exception as e:
             logger.error(f"批量嵌入失败: {e}")

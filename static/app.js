@@ -8,7 +8,23 @@ class SuperBizAgentApp {
         this.currentChatHistory = []; // 当前对话的消息历史
         this.chatHistories = this.loadChatHistories(); // 所有历史对话
         this.isCurrentChatFromHistory = false; // 标记当前对话是否是从历史记录加载的
-        
+
+        // 意图类型 → 中文标签 + 颜色 + 图标 映射
+        this.INTENT_LABELS = {
+            'knowledge_qa':    { label: '知识问答', color: '#1a73e8', icon: '📚' },
+            'document_op':     { label: '文档操作', color: '#34a853', icon: '📄' },
+            'aiops_diagnose':  { label: '运维诊断', color: '#ea4335', icon: '🔧' },
+            'web_search':      { label: '网络搜索', color: '#009688', icon: '🔍' },
+            'comparison':      { label: '对比分析', color: '#9c27b0', icon: '⚖️' },
+            'multi_step_task': { label: '多步任务', color: '#ff9800', icon: '🔄' },
+            'clarification':   { label: '追问澄清', color: '#00bcd4', icon: '💬' },
+            'chitchat':        { label: '闲聊',     color: '#9e9e9e', icon: '👋' },
+            'unknown':         { label: '未识别',   color: '#bdbdbd', icon: '❓' },
+        };
+
+        // 网络搜索开关状态
+        this.webSearchEnabled = false;
+
         this.initializeElements();
         this.bindEvents();
         this.updateUI();
@@ -105,6 +121,8 @@ class SuperBizAgentApp {
         this.toolsBtn = document.getElementById('toolsBtn');
         this.toolsMenu = document.getElementById('toolsMenu');
         this.uploadFileItem = document.getElementById('uploadFileItem');
+        this.webSearchItem = document.getElementById('webSearchItem');
+        this.webSearchIndicator = document.getElementById('webSearchIndicator');
         this.modeSelectorBtn = document.getElementById('modeSelectorBtn');
         this.modeDropdown = document.getElementById('modeDropdown');
         this.currentModeText = document.getElementById('currentModeText');
@@ -186,6 +204,24 @@ class SuperBizAgentApp {
             this.uploadFileItem.addEventListener('click', () => {
                 if (this.fileInput) {
                     this.fileInput.click();
+                }
+                this.closeToolsMenu();
+            });
+        }
+
+        // 网络搜索开关
+        if (this.webSearchItem) {
+            this.webSearchItem.addEventListener('click', () => {
+                this.webSearchEnabled = !this.webSearchEnabled;
+                if (this.webSearchIndicator) {
+                    this.webSearchIndicator.textContent = this.webSearchEnabled ? 'ON' : 'OFF';
+                    this.webSearchIndicator.classList.toggle('active', this.webSearchEnabled);
+                }
+                // 更新输入框占位符提示
+                if (this.messageInput) {
+                    this.messageInput.placeholder = this.webSearchEnabled
+                        ? '问问智能OnCall助手（网络搜索已开启）'
+                        : '问问智能OnCall助手';
                 }
                 this.closeToolsMenu();
             });
@@ -688,7 +724,8 @@ class SuperBizAgentApp {
                 },
                 body: JSON.stringify({
                     Id: this.sessionId,
-                    Question: message
+                    Question: message,
+                    EnableWebSearch: this.webSearchEnabled
                 })
             });
 
@@ -712,7 +749,11 @@ class SuperBizAgentApp {
                 if (chatResponse && chatResponse.success) {
                     // 成功：添加实际响应消息（即使 answer 为空也显示）
                     const answer = chatResponse.answer || '（无回复内容）';
-                    this.addMessage('assistant', answer);
+                    const assistantMsgEl = this.addMessage('assistant', answer);
+                    // 添加意图识别卡片（如果后端返回了意图数据）
+                    if (chatResponse.intent) {
+                        this.addIntentCard(assistantMsgEl, chatResponse.intent);
+                    }
                 } else if (chatResponse && chatResponse.errorMessage) {
                     // 业务错误
                     throw new Error(chatResponse.errorMessage);
@@ -744,7 +785,8 @@ class SuperBizAgentApp {
                 },
                 body: JSON.stringify({
                     Id: this.sessionId,
-                    Question: message
+                    Question: message,
+                    EnableWebSearch: this.webSearchEnabled
                 })
             });
 
@@ -818,7 +860,7 @@ class SuperBizAgentApp {
                                         const content = sseMessage.data || '';
                                         fullResponse += content;
                                         console.log('[SSE调试] 添加内容:', content);
-                                        
+
                                         // 实时渲染 Markdown
                                         if (assistantMessageElement) {
                                             const messageContent = assistantMessageElement.querySelector('.message-content');
@@ -827,10 +869,39 @@ class SuperBizAgentApp {
                                             this.highlightCodeBlocks(messageContent);
                                             this.scrollToBottom();
                                         }
+                                    } else if (sseMessage.type === 'intent') {
+                                        // 意图识别结果（在内容流之前到达）
+                                        console.log('[SSE调试] 收到意图识别结果:', sseMessage.data);
+                                        if (assistantMessageElement && sseMessage.data) {
+                                            this.addIntentCard(assistantMessageElement, sseMessage.data);
+                                            this.scrollToBottom();
+                                        }
                                     } else if (sseMessage.type === 'done') {
                                         console.log('[SSE调试] 收到done标记，流结束');
                                         this.handleStreamComplete(assistantMessageElement, fullResponse);
                                         return;
+                                    } else if (sseMessage.type === 'orchestration_start') {
+                                    // 编排开始：一行进度提示
+                                    console.log('[SSE调试] 收到编排开始:', sseMessage.data);
+                                    if (assistantMessageElement && sseMessage.data) {
+                                        this.initOrchestrationPanel(assistantMessageElement, sseMessage.data);
+                                        this.scrollToBottom();
+                                    }
+                                } else if (sseMessage.type === 'orchestration_summary') {
+                                    // 编排汇总：更新进度行状态
+                                    console.log('[SSE调试] 收到编排汇总:', sseMessage.data);
+                                    if (assistantMessageElement && sseMessage.data) {
+                                        this.finishOrchestrationPanel(assistantMessageElement, sseMessage.data);
+                                        this.scrollToBottom();
+                                    }
+                                } else if (sseMessage.type === 'web_search') {
+                                        // 网络检索触发通知
+                                        const triggerType = sseMessage.data?.trigger === 'auto' ? '自动' : '手动';
+                                        const resultsCount = sseMessage.data?.results_count || 0;
+                                        this.showNotification(
+                                            `已${triggerType}触发网络搜索，找到 ${resultsCount} 条结果`,
+                                            'info'
+                                        );
                                     } else if (sseMessage.type === 'error') {
                                         console.error('[SSE调试] 收到错误:', sseMessage.data);
                                         if (assistantMessageElement) {
@@ -998,7 +1069,416 @@ class SuperBizAgentApp {
 
         return messageDiv;
     }
-    
+
+    // 添加意图识别卡片（在助手消息内容上方显示）
+    addIntentCard(messageElement, intentData) {
+        if (!messageElement || !intentData || !intentData.primary_intent) return null;
+
+        const wrapper = messageElement.querySelector('.message-content-wrapper');
+        if (!wrapper) return null;
+
+        const primary = intentData.primary_intent;
+        const meta = this.INTENT_LABELS[primary.intent_type] || this.INTENT_LABELS['unknown'];
+        const pct = Math.round((intentData.confidence || 0) * 100);
+
+        // ── 卡片容器 ──
+        const card = document.createElement('div');
+        card.className = 'intent-card';
+
+        // ── 头部（始终可见）──
+        const header = document.createElement('div');
+        header.className = 'intent-card-header';
+
+        // 意图徽章
+        const badge = document.createElement('span');
+        badge.className = 'intent-badge';
+        badge.style.background = meta.color;
+        badge.textContent = `${meta.icon} ${meta.label}`;
+        header.appendChild(badge);
+
+        // 置信度条
+        const confWrap = document.createElement('span');
+        confWrap.className = 'intent-confidence';
+        const barBg = document.createElement('span');
+        barBg.className = 'intent-confidence-bar-bg';
+        const bar = document.createElement('span');
+        bar.className = 'intent-confidence-bar';
+        bar.style.width = pct + '%';
+        bar.style.background = meta.color;
+        barBg.appendChild(bar);
+        confWrap.appendChild(barBg);
+        const confText = document.createElement('span');
+        confText.className = 'intent-confidence-text';
+        confText.textContent = pct + '%';
+        confWrap.appendChild(confText);
+        header.appendChild(confWrap);
+
+        // 功能标签：多意图 / 复杂 / 延续 / 切换
+        if (intentData.is_multi_intent) {
+            const tag = document.createElement('span');
+            tag.className = 'intent-tag multi';
+            tag.textContent = '多意图';
+            header.appendChild(tag);
+        }
+        if (intentData.is_complex) {
+            const tag = document.createElement('span');
+            tag.className = 'intent-tag complex';
+            tag.textContent = '复杂';
+            header.appendChild(tag);
+        }
+        if (intentData.intent_shift) {
+            const tag = document.createElement('span');
+            tag.className = 'intent-tag shifted';
+            tag.textContent = '↗ 切换';
+            header.appendChild(tag);
+        } else if (intentData.context_references && intentData.context_references.length > 0) {
+            const tag = document.createElement('span');
+            tag.className = 'intent-tag continuation';
+            tag.textContent = '↩ 延续';
+            header.appendChild(tag);
+        }
+
+        // 实体标签
+        if (primary.entities && primary.entities.length > 0) {
+            const entWrap = document.createElement('span');
+            entWrap.className = 'intent-entities';
+            primary.entities.forEach(ent => {
+                const etag = document.createElement('span');
+                etag.className = 'intent-entity-tag';
+                etag.textContent = ent;
+                entWrap.appendChild(etag);
+            });
+            header.appendChild(entWrap);
+        }
+
+        // 展开图标
+        const expandIcon = document.createElement('span');
+        expandIcon.className = 'intent-expand-icon';
+        expandIcon.textContent = '▸';
+        header.appendChild(expandIcon);
+
+        card.appendChild(header);
+
+        // ── 详情（默认折叠）──
+        const body = document.createElement('div');
+        body.className = 'intent-card-body';
+
+        if (primary.description) {
+            body.appendChild(this._intentDetailRow('描述', primary.description));
+        }
+        if (primary.suggested_tools && primary.suggested_tools.length > 0) {
+            body.appendChild(this._intentDetailRow('建议工具', primary.suggested_tools.join(', ')));
+        }
+        if (intentData.secondary_intents && intentData.secondary_intents.length > 0) {
+            const label = document.createElement('div');
+            label.className = 'intent-detail-row';
+            label.innerHTML = '<strong>副意图:</strong>';
+            body.appendChild(label);
+            intentData.secondary_intents.forEach(s => {
+                const sm = this.INTENT_LABELS[s.intent_type] || this.INTENT_LABELS['unknown'];
+                const sub = document.createElement('div');
+                sub.className = 'intent-sub-intent';
+                let text = `· ${sm.icon} ${sm.label}: ${s.description}`;
+                if (s.depends_on) text += ` — 依赖: ${s.depends_on}`;
+                sub.textContent = text;
+                body.appendChild(sub);
+            });
+        }
+        if (intentData.context_references && intentData.context_references.length > 0) {
+            body.appendChild(this._intentDetailRow('引用上文', intentData.context_references.join(', ')));
+        }
+        if (primary.depends_on) {
+            body.appendChild(this._intentDetailRow('依赖', primary.depends_on));
+        }
+        if (intentData.reasoning) {
+            body.appendChild(this._intentDetailRow('理由', intentData.reasoning));
+        }
+
+        card.appendChild(body);
+
+        // 点击头部切换折叠
+        header.addEventListener('click', () => {
+            card.classList.toggle('expanded');
+        });
+
+        // 插入到 message-content 之前
+        const messageContent = wrapper.querySelector('.message-content');
+        if (messageContent) {
+            wrapper.insertBefore(card, messageContent);
+        } else {
+            wrapper.appendChild(card);
+        }
+
+        return card;
+    }
+
+    // ── 编排进度面板（多意图/复杂意图自动分解编排） ──
+    _ensureOrchestrationPanel(messageElement) {
+        if (!messageElement) return null;
+        const wrapper = messageElement.querySelector('.message-content-wrapper');
+        if (!wrapper) return null;
+
+        let panel = wrapper.querySelector('.orchestration-panel');
+        if (panel) return panel;
+
+        panel = document.createElement('div');
+        panel.className = 'orchestration-panel';
+
+        const title = document.createElement('div');
+        title.className = 'orchestration-title';
+        title.textContent = '⚙ 正在分解为独立子问题并并行求解…';
+        panel.appendChild(title);
+
+        const stepList = document.createElement('div');
+        stepList.className = 'orchestration-steps';
+        panel.appendChild(stepList);
+
+        const summaryBox = document.createElement('div');
+        summaryBox.className = 'orchestration-summary';
+        summaryBox.style.display = 'none';
+        panel.appendChild(summaryBox);
+
+        const messageContent = wrapper.querySelector('.message-content');
+        if (messageContent) {
+            wrapper.insertBefore(panel, messageContent);
+        } else {
+            wrapper.appendChild(panel);
+        }
+        return panel;
+    }
+
+    // DeepSeek 风格：给子任务条目增加"标题行+右侧隐藏/展开切换按钮+可折叠内容区"
+    // 内部工具：把一个已创建的 stepEl 升级为可折叠（加入 header 结构、toggle 按钮、内容区）
+    _upgradeStepAsCollapsible(stepEl, question) {
+        // 清空现有的自动结构，重新组装（保留 dataset.stepIndex）
+        stepEl.innerHTML = '';
+
+        const icon = document.createElement('span');
+        icon.className = 'orchestration-step-icon';
+        icon.textContent = '○';
+        stepEl.appendChild(icon);
+
+        const mainEl = document.createElement('div');
+        mainEl.className = 'orchestration-step-main';
+
+        // ── 标题行（始终可见，点击整体切换展开/折叠） ──
+        const headerEl = document.createElement('div');
+        headerEl.className = 'orchestration-step-header';
+
+        const label = document.createElement('span');
+        label.className = 'orchestration-step-label';
+        label.textContent = question || `子任务`;
+        headerEl.appendChild(label);
+
+        const rightEl = document.createElement('span');
+        rightEl.className = 'orchestration-step-right';
+
+        const meta = document.createElement('span');
+        meta.className = 'orchestration-step-meta';
+        meta.textContent = '待开始';
+        rightEl.appendChild(meta);
+
+        // 折叠切换按钮（DeepSeek 风格的"隐藏/展开"文字切换）
+        const toggleBtn = document.createElement('span');
+        toggleBtn.className = 'orchestration-step-toggle';
+        toggleBtn.textContent = '展开';
+        rightEl.appendChild(toggleBtn);
+
+        headerEl.appendChild(rightEl);
+        mainEl.appendChild(headerEl);
+
+        // ── 内容区（默认隐藏；running 时自动展开；done/failed 时默认隐藏，用户可手动展开） ──
+        const contentEl = document.createElement('div');
+        contentEl.className = 'orchestration-step-content';
+        contentEl.style.display = 'none';
+        mainEl.appendChild(contentEl);
+
+        stepEl.appendChild(mainEl);
+
+        // 点击整个 step 切换展开/折叠
+        const _toggle = () => {
+            if (contentEl.style.display === 'none') {
+                contentEl.style.display = '';
+                stepEl.classList.add('expanded');
+                toggleBtn.textContent = '隐藏';
+            } else {
+                contentEl.style.display = 'none';
+                stepEl.classList.remove('expanded');
+                toggleBtn.textContent = '展开';
+            }
+        };
+
+        stepEl.addEventListener('click', (e) => {
+            // pending 状态不允许点击（还没开始就没内容可看）
+            if (stepEl.classList.contains('pending')) return;
+            _toggle();
+        });
+
+        // 把内部引用存到 stepEl 上，供后续 update / appendText 调用
+        stepEl._ui = { icon, meta, contentEl, toggleBtn };
+    }
+
+    // 编排开始：一行进度提示（"正在分解为 N 个子问题并行检索…"）
+    initOrchestrationPanel(messageElement, startData) {
+        const panel = this._ensureOrchestrationPanel(messageElement);
+        if (!panel || !startData) return;
+        const stepList = panel.querySelector('.orchestration-steps');
+        if (stepList) {
+            // v2：不再需要子任务列表
+            stepList.style.display = 'none';
+        }
+
+        const total = startData.total || 0;
+        const subtasks = startData.subtasks || [];
+        const titleEl = panel.querySelector('.orchestration-title');
+
+        // 展示各子任务的意图类型，便于用户了解在处理什么
+        let summary = '';
+        const lines = [];
+        for (const st of subtasks) {
+            const type = (st.intent_type || '').toString();
+            const tools = (st.suggested_tools || []);
+            const toolText = tools.length ? `(${tools.join('/')})` : '(直接生成)';
+            lines.push(`[${type}]${toolText}`);
+        }
+        if (lines.length) summary = ' —— 涉及: ' + '、'.concat(...lines);
+
+        if (titleEl) {
+            titleEl.innerHTML = `<span style="display:inline-block;animation:spin 1s linear infinite">⚙</span> 正在分解为 <b>${total}</b> 个子问题并行检索${summary}…`;
+        }
+
+        // 在 CSS 中增加一个简单的 spin 动画（仅注入一次）
+        if (!document.getElementById('orchestration-style-extra')) {
+            const style = document.createElement('style');
+            style.id = 'orchestration-style-extra';
+            style.textContent = `@keyframes spin { from{transform:rotate(0)} to{transform:rotate(360deg)} }`;
+            document.head.appendChild(style);
+        }
+    }
+
+    // 子任务状态更新：把 icon + meta + 状态 class 切换，内容区折叠策略
+    updateOrchestrationPanel(messageElement, stepData) {
+        const panel = this._ensureOrchestrationPanel(messageElement);
+        if (!panel || !stepData) return;
+
+        const stepIdx = stepData.step_index ?? stepData.index ?? -1;
+        let stepEl = panel.querySelector(`.orchestration-step[data-step-index="${stepIdx}"]`);
+        if (!stepEl) {
+            // 兼容 fallback：没有 initOrchestrationPanel 时也能动态创建
+            const stepList = panel.querySelector('.orchestration-steps');
+            if (!stepList) return;
+            stepEl = document.createElement('div');
+            stepEl.className = 'orchestration-step pending';
+            stepEl.dataset.stepIndex = stepIdx;
+            this._upgradeStepAsCollapsible(
+                stepEl,
+                stepData.subtask_question || stepData.question || `子任务 ${stepIdx}`
+            );
+            stepList.appendChild(stepEl);
+        }
+
+        const status = stepData.status || 'running';
+        stepEl.classList.remove('pending', 'running', 'done', 'failed');
+        stepEl.classList.add(status);
+
+        const ui = stepEl._ui;
+        if (!ui) return;
+
+        const { icon, meta, contentEl, toggleBtn } = ui;
+
+        if (status === 'running') {
+            if (icon) icon.textContent = '⏳';
+            if (meta) meta.textContent = '求解中…';
+            // 运行中自动展开内容区（实时看进度）
+            contentEl.style.display = '';
+            stepEl.classList.add('expanded');
+            if (toggleBtn) toggleBtn.textContent = '隐藏';
+        } else if (status === 'done') {
+            if (icon) icon.textContent = '✓';
+            const ms = stepData.duration_ms ?? stepData.elapsed_ms ?? null;
+            if (meta) meta.textContent = ms != null ? `完成 (${(ms / 1000).toFixed(1)}s)` : '完成';
+            // 完成后：把纯文本内容替换为 markdown 渲染
+            if (contentEl && contentEl._rawText) {
+                contentEl.innerHTML = this.renderMarkdown(contentEl._rawText);
+                this.highlightCodeBlocks(contentEl);
+            }
+            // DeepSeek 风格：完成后默认折叠（隐藏），用户可点"展开"查看
+            contentEl.style.display = 'none';
+            stepEl.classList.remove('expanded');
+            if (toggleBtn) toggleBtn.textContent = '展开';
+        } else if (status === 'failed') {
+            if (icon) icon.textContent = '✗';
+            if (meta) meta.textContent = stepData.error || '失败';
+            // 失败默认折叠，用户可展开看错误
+            contentEl.style.display = 'none';
+            stepEl.classList.remove('expanded');
+            if (toggleBtn) toggleBtn.textContent = '展开';
+        }
+    }
+
+    // 子任务流式内容追加：对应 subtask_index 的内容区追加纯文本
+    _appendSubtaskContent(messageElement, subtaskIndex, text) {
+        if (!messageElement || !text) return;
+        const panel = messageElement.querySelector('.orchestration-panel');
+        if (!panel) return;
+        const stepEl = panel.querySelector(`.orchestration-step[data-step-index="${subtaskIndex}"]`);
+        if (!stepEl) return;
+        const ui = stepEl._ui;
+        const contentEl = ui && ui.contentEl;
+        if (!contentEl) return;
+        // 累积为纯文本（_rawText 用作后续渲染为 markdown 的缓存）
+        contentEl._rawText = (contentEl._rawText || '') + text;
+        contentEl.textContent = contentEl._rawText;
+    }
+
+    finishOrchestrationPanel(messageElement, summaryData) {
+        const panel = this._ensureOrchestrationPanel(messageElement);
+        if (!panel) return;
+
+        const titleEl = panel.querySelector('.orchestration-title');
+        const summaryBox = panel.querySelector('.orchestration-summary');
+
+        const mode = summaryData.summary_mode || 'unknown';
+        const succeeded = summaryData.succeeded_count ?? null;
+        const total = summaryData.total_count ?? null;
+        const elapsed = summaryData.elapsed_ms ?? null;
+
+        let modeText = '';
+        if (mode === 'llm_synthesis') modeText = 'LLM 综合汇总';
+        else if (mode === 'single_success') modeText = '取唯一成功子任务结果';
+        else if (mode === 'concat_all') modeText = '拼接工具结果';
+        else if (mode === 'fallback') modeText = '未产出有效结果，回退到原 Agent';
+        else modeText = mode;
+
+        let counter = '';
+        if (succeeded != null && total != null) counter = `（${succeeded}/${total} 个子任务有结果）`;
+
+        if (titleEl) {
+            titleEl.innerHTML = `✓ 已完成并行检索${counter}，${modeText}生成回答`;
+        }
+
+        if (summaryBox) {
+            summaryBox.innerHTML = '';
+            if (elapsed != null) {
+                const t = document.createElement('div');
+                t.className = 'orchestration-summary-meta';
+                t.textContent = `总耗时: ${(elapsed / 1000).toFixed(1)}s`;
+                summaryBox.appendChild(t);
+            }
+            summaryBox.style.display = 'block';
+        }
+
+        panel.classList.add('finished');
+    }
+
+    // 意图详情行辅助
+    _intentDetailRow(label, value) {
+        const row = document.createElement('div');
+        row.className = 'intent-detail-row';
+        row.innerHTML = `<strong>${label}:</strong> ${this.escapeHtml(value)}`;
+        return row;
+    }
+
     // 检查并设置居中样式
     checkAndSetCentered() {
         if (this.chatMessages && this.chatContainer) {
@@ -1092,7 +1572,7 @@ class SuperBizAgentApp {
         if (file) {
             // 验证文件格式
             if (!this.validateFileType(file)) {
-                this.showNotification('只支持上传 TXT 或 Markdown (.md) 格式的文件', 'error');
+                this.showNotification('只支持上传 TXT / Markdown / PDF / DOCX 格式的文件', 'error');
                 this.fileInput.value = '';
                 return;
             }
@@ -1103,7 +1583,7 @@ class SuperBizAgentApp {
     // 验证文件类型
     validateFileType(file) {
         const fileName = file.name.toLowerCase();
-        const allowedExtensions = ['.txt', '.md', '.markdown'];
+        const allowedExtensions = ['.txt', '.md', '.markdown', '.pdf', '.docx'];
         return allowedExtensions.some(ext => fileName.endsWith(ext));
     }
 
@@ -1111,7 +1591,7 @@ class SuperBizAgentApp {
     async uploadFile(file) {
         // 再次验证文件类型（双重保险）
         if (!this.validateFileType(file)) {
-            this.showNotification('只支持上传 TXT 或 Markdown (.md) 格式的文件', 'error');
+            this.showNotification('只支持上传 TXT / Markdown / PDF / DOCX 格式的文件', 'error');
             return;
         }
 

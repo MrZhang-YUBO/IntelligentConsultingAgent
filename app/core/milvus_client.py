@@ -48,6 +48,7 @@ class MilvusClientManager:
     COLLECTION_NAME: str = "biz"
     VECTOR_DIM: int = 1024  # 统一使用 1024 维
     ID_MAX_LENGTH: int = 100
+    DOCUMENT_ID_MAX_LENGTH: int = 100  # document_id 字段长度
     CONTENT_MAX_LENGTH: int = 8000
     DEFAULT_SHARD_NUMBER: int = 2
 
@@ -98,29 +99,43 @@ class MilvusClientManager:
             else:
                 logger.info(f"collection '{self.COLLECTION_NAME}' 已存在")
                 self._collection = Collection(self.COLLECTION_NAME)
-                
-                # 检查向量维度是否匹配
+
+                # 检查 schema：向量维度 + 是否有 document_id 字段
                 schema = self._collection.schema
+                field_names = {field.name for field in schema.fields}
+                needs_rebuild = False
+                reasons: list[str] = []
+
+                # 1. 检查 document_id 字段是否存在
+                if "document_id" not in field_names:
+                    needs_rebuild = True
+                    reasons.append("缺少 document_id 字段（动态更新必需）")
+
+                # 2. 检查向量维度
                 vector_field = None
                 existing_dim = None
                 for field in schema.fields:
                     if field.name == "vector":
                         vector_field = field
                         break
-                
-                if vector_field and hasattr(vector_field, 'params') and 'dim' in vector_field.params:
-                    existing_dim = vector_field.params['dim']
+
+                if vector_field and hasattr(vector_field, "params") and "dim" in vector_field.params:
+                    existing_dim = vector_field.params["dim"]
                     if existing_dim != self.VECTOR_DIM:
-                        logger.warning(
-                            f"检测到向量维度不匹配！当前 collection 维度: {existing_dim}, 配置维度: {self.VECTOR_DIM}"
-                        )
-                        logger.info(f"正在删除旧 collection '{self.COLLECTION_NAME}'...")
-                        _ = utility.drop_collection(self.COLLECTION_NAME)
-                        logger.info(f"正在重新创建 collection '{self.COLLECTION_NAME}'...")
-                        self._create_collection()
-                        logger.info(f"成功重新创建 collection，维度: {self.VECTOR_DIM}")
-                    else:
-                        logger.info(f"向量维度匹配: {self.VECTOR_DIM}")
+                        needs_rebuild = True
+                        reasons.append(f"向量维度不匹配（当前 {existing_dim}，需要 {self.VECTOR_DIM}）")
+
+                if needs_rebuild:
+                    logger.warning(
+                        f"检测到 schema 不兼容: {'; '.join(reasons)}"
+                    )
+                    logger.info(f"正在删除旧 collection '{self.COLLECTION_NAME}'...")
+                    _ = utility.drop_collection(self.COLLECTION_NAME)
+                    logger.info(f"正在重新创建 collection '{self.COLLECTION_NAME}'...")
+                    self._create_collection()
+                    logger.info(f"成功重建 collection（schema 已升级）")
+                else:
+                    logger.info(f"Collection schema 检查通过（包含 document_id，维度 {self.VECTOR_DIM}）")
 
             # 加载 collection
             self._load_collection()
@@ -157,6 +172,11 @@ class MilvusClientManager:
                 is_primary=True,
             ),
             FieldSchema(
+                name="document_id",
+                dtype=DataType.VARCHAR,
+                max_length=self.DOCUMENT_ID_MAX_LENGTH,
+            ),
+            FieldSchema(
                 name="vector",
                 dtype=DataType.FLOAT_VECTOR,
                 dim=self.VECTOR_DIM,
@@ -175,7 +195,7 @@ class MilvusClientManager:
         # 创建 schema
         schema = CollectionSchema(
             fields=fields,
-            description="Business knowledge collection",
+            description="Business knowledge collection (with document_id)",
             enable_dynamic_field=False,
         )
 

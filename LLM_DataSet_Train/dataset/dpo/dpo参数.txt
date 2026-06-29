@@ -1,0 +1,23 @@
+CUDA_VISIBLE_DEVICES=0 llamafactory-cli train \
+  --stage dpo \
+  --do_train \
+  --model_name_or_path /mnt/systemDisk/model_cache/Qwen/Qwen2.5-7B-Instruct \
+  --dataset dpo_law \
+  --dataset_dir data \
+  --template qwen \
+  --finetuning_type lora \
+  --lora_target all \
+  --output_dir outputs/qwen2.5-7b_lora_DPO_dpo_law_len512_bs2_ga4_beta0.1 \
+  --overwrite_output_dir \
+  --cutoff_len 512 \
+  --per_device_train_batch_size 2 \
+  --gradient_accumulation_steps 4 \
+  --learning_rate 5e-6 \
+  --num_train_epochs 1.0 \
+  --lr_scheduler_type cosine \
+  --warmup_ratio 0.05 \
+  --fp16 \
+  --logging_steps 10 \
+  --save_steps 200 \
+  --save_total_limit 2
+

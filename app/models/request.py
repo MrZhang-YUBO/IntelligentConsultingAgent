@@ -11,13 +11,17 @@ class ChatRequest(BaseModel):
 
     id: str = Field(..., description="会话 ID", alias="Id")
     question: str = Field(..., description="用户问题", alias="Question")
+    enable_web_search: bool = Field(
+        default=False, description="是否启用网络搜索", alias="EnableWebSearch"
+    )
 
     class Config:
         populate_by_name = True
         json_schema_extra = {
             "example": {
                 "Id": "session-123",
-                "Question": "什么是向量数据库？"
+                "Question": "什么是向量数据库？",
+                "EnableWebSearch": False,
             }
         }
 

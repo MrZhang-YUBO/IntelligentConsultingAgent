@@ -38,8 +38,13 @@ async def chat(request: ChatRequest):
         logger.info(f"[会话 {request.id}] 收到快速对话请求: {request.question}")
         answer = await rag_agent_service.query(
             request.question,
-            session_id=request.id
+            session_id=request.id,
+            enable_web_search=request.enable_web_search,
         )
+
+        # 取本轮意图识别结果（query 内部已记录到轨迹，取最后一条即本轮）
+        intents = rag_agent_service.get_session_intents(request.id)
+        latest_intent = intents[-1] if intents else None
 
         logger.info(f"[会话 {request.id}] 快速对话完成")
 
@@ -49,6 +54,7 @@ async def chat(request: ChatRequest):
             "data": {
                 "success": True,
                 "answer": answer,
+                "intent": latest_intent,
                 "errorMessage": None
             }
         }
@@ -94,10 +100,15 @@ async def chat_stream(request: ChatRequest):
 
     async def event_generator():
         try:
-            async for chunk in rag_agent_service.query_stream(request.question, session_id=request.id):
+            async for chunk in rag_agent_service.query_stream(
+                request.question, session_id=request.id,
+                enable_web_search=request.enable_web_search,
+            ):
                 chunk_type = chunk.get("type", "unknown")
                 chunk_data = chunk.get("data", None)
 
+                logger.info(
+                    f"[流式调试] yield type={chunk.get('type')}, data_preview={str(chunk.get('data', ''))[:200]}")
                 # 处理调试类型消息（新增）
                 if chunk_type == "debug":
                     # 调试信息，可以选择发送或忽略
@@ -107,6 +118,42 @@ async def chat_stream(request: ChatRequest):
                             "type": "debug",
                             "node": chunk.get("node", "unknown"),
                             "message_type": chunk.get("message_type", "unknown")
+                        }, ensure_ascii=False)
+                    }
+                elif chunk_type == "intent":
+                    # 意图识别结果（在内容流之前到达，前端可展示"系统理解到的意图"）
+                    yield {
+                        "event": "message",
+                        "data": json.dumps({
+                            "type": "intent",
+                            "data": chunk_data
+                        }, ensure_ascii=False)
+                    }
+                elif chunk_type == "orchestration_start":
+                    # 编排开始：宣告子任务总数与清单
+                    yield {
+                        "event": "message",
+                        "data": json.dumps({
+                            "type": "orchestration_start",
+                            "data": chunk_data
+                        }, ensure_ascii=False)
+                    }
+                elif chunk_type == "orchestration_step":
+                    # 编排进度：子任务开始/结束
+                    yield {
+                        "event": "message",
+                        "data": json.dumps({
+                            "type": "orchestration_step",
+                            "data": chunk_data
+                        }, ensure_ascii=False)
+                    }
+                elif chunk_type == "orchestration_summary":
+                    # 编排汇总结果
+                    yield {
+                        "event": "message",
+                        "data": json.dumps({
+                            "type": "orchestration_summary",
+                            "data": chunk_data
                         }, ensure_ascii=False)
                     }
                 elif chunk_type == "tool_call":
@@ -127,14 +174,30 @@ async def chat_stream(request: ChatRequest):
                             "data": chunk_data
                         }, ensure_ascii=False)
                     }
-                elif chunk_type == "content":
-                    # 发送内容块 - 关键：data 必须是 JSON 字符串
+                elif chunk_type == "web_search":
+                    # 网络检索触发通知
                     yield {
                         "event": "message",
                         "data": json.dumps({
-                            "type": "content",
+                            "type": "web_search",
                             "data": chunk_data
                         }, ensure_ascii=False)
+                    }
+                elif chunk_type == "content":
+                    # 发送内容块；如带 subtask_index，代表"某子任务的流式内容"
+                    out = {
+                        "type": "content",
+                        "data": chunk_data
+                    }
+                    subtask_idx = chunk.get("subtask_index")
+                    if subtask_idx is not None:
+                        out["subtask_index"] = subtask_idx
+                    node = chunk.get("node")
+                    if node is not None:
+                        out["node"] = node
+                    yield {
+                        "event": "message",
+                        "data": json.dumps(out, ensure_ascii=False)
                     }
                 elif chunk_type == "complete":
                     # 发送完成信号
@@ -207,11 +270,13 @@ async def get_session_info(session_id: str) -> SessionInfoResponse:
     """
     try:
         history = rag_agent_service.get_session_history(session_id)
+        intents = rag_agent_service.get_session_intents(session_id)
 
         return SessionInfoResponse(
             session_id=session_id,
             message_count=len(history),
-            history=history
+            history=history,
+            intents=intents
         )
 
     except Exception as e:
